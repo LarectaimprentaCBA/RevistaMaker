@@ -1,9 +1,74 @@
-import React, { useRef, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
+
+// Input numerico que guarda valor en MM internamente pero muestra/edita en la unidad
+// seleccionada por el usuario (cm o mm). Mantiene un buffer de texto local mientras
+// se edita para que se pueda escribir libremente (puntos decimales, borrar todo, etc.).
+// Solo "commitea" al padre en onBlur o Enter.
+function NumInputMm({ valueMm, factor, onCommitMm, className = '' }) {
+  const formatted = (mm) => {
+    const v = (mm || 0) / factor
+    if (!Number.isFinite(v)) return ''
+    return Number.isInteger(v) ? String(v) : v.toFixed(1)
+  }
+
+  const [text, setText] = useState(formatted(valueMm))
+  const editingRef = useRef(false)
+
+  // Sincronizar el buffer cuando cambia el valor desde afuera (presets, link hoja/pliego)
+  // pero solo si NO estamos editando ahora mismo.
+  useEffect(() => {
+    if (!editingRef.current) setText(formatted(valueMm))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [valueMm, factor])
+
+  function commit() {
+    const norm = text.replace(',', '.').trim()
+    const n = parseFloat(norm)
+    if (Number.isFinite(n) && n > 0) {
+      onCommitMm(n * factor)
+    } else {
+      // revertir al valor previo si quedo vacio o invalido
+      setText(formatted(valueMm))
+    }
+  }
+
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      value={text}
+      onFocus={() => {
+        editingRef.current = true
+      }}
+      onChange={(e) => setText(e.target.value)}
+      onBlur={() => {
+        editingRef.current = false
+        commit()
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') e.currentTarget.blur()
+        else if (e.key === 'Escape') {
+          setText(formatted(valueMm))
+          e.currentTarget.blur()
+        }
+      }}
+      className={className}
+    />
+  )
+}
 
 export default function TopBar({
   pageWmm,
   pageHmm,
-  onChangeSize,
+  sheetWmm,
+  sheetHmm,
+  copiesPerSheet,
+  maxCopies,
+  nupRotated,
+  onChangePageSize,
+  onChangeSheetSize,
+  onChangeCopies,
+  onResetSheet,
   onLoadFiles,
   onClearAll,
   onExport,
@@ -14,25 +79,7 @@ export default function TopBar({
   const fileRef = useRef(null)
   const [unit, setUnit] = useState('cm')
 
-  const factor = unit === 'cm' ? 10 : 1 // mm por unidad visible
-  const fmt = (mm) => {
-    const v = mm / factor
-    // 1 decimal solo si hace falta
-    return Number.isInteger(v) ? String(v) : v.toFixed(1)
-  }
-
-  const sheetWdisp = fmt(pageWmm * 2)
-  const sheetHdisp = fmt(pageHmm)
-
-  function changeSheet(wDisp, hDisp) {
-    const sheetWmm = (Number(wDisp) || 0) * factor
-    const sheetHmm = (Number(hDisp) || 0) * factor
-    onChangeSize(sheetWmm / 2, sheetHmm)
-  }
-
-  function setPresetMm(sheetWmm, sheetHmm) {
-    onChangeSize(sheetWmm / 2, sheetHmm)
-  }
+  const factor = unit === 'cm' ? 10 : 1
 
   return (
     <div className="bg-white border-b border-neutral-300 px-4 py-2 flex items-center gap-3 flex-wrap">
@@ -57,24 +104,55 @@ export default function TopBar({
         className="hidden"
       />
 
+      {/* Tamano de pagina de la revista */}
       <div className="flex items-center gap-1 text-sm">
-        <span className="text-neutral-600">Hoja:</span>
-        <input
-          type="number"
-          min="1"
-          step="0.1"
-          value={sheetWdisp}
-          onChange={(e) => changeSheet(e.target.value, sheetHdisp)}
-          className="w-16 px-1.5 py-1 border border-neutral-300 rounded text-right"
+        <span className="text-neutral-600">Revista (1 pag):</span>
+        <NumInputMm
+          valueMm={pageWmm}
+          factor={factor}
+          onCommitMm={(mm) => onChangePageSize(mm, pageHmm)}
+          className="w-14 px-1.5 py-1 border border-neutral-300 rounded text-right"
         />
         <span>x</span>
-        <input
-          type="number"
-          min="1"
-          step="0.1"
-          value={sheetHdisp}
-          onChange={(e) => changeSheet(sheetWdisp, e.target.value)}
-          className="w-16 px-1.5 py-1 border border-neutral-300 rounded text-right"
+        <NumInputMm
+          valueMm={pageHmm}
+          factor={factor}
+          onCommitMm={(mm) => onChangePageSize(pageWmm, mm)}
+          className="w-14 px-1.5 py-1 border border-neutral-300 rounded text-right"
+        />
+        <div className="flex items-center gap-1 ml-1">
+          <button
+            onClick={() => onChangePageSize(148, 210)}
+            className="px-1.5 py-0.5 bg-neutral-100 border border-neutral-300 rounded text-xs hover:bg-neutral-200"
+            title="A5 vertical (148x210 mm)"
+          >
+            A5
+          </button>
+          <button
+            onClick={() => onChangePageSize(210, 297)}
+            className="px-1.5 py-0.5 bg-neutral-100 border border-neutral-300 rounded text-xs hover:bg-neutral-200"
+            title="A4 vertical (210x297 mm)"
+          >
+            A4
+          </button>
+        </div>
+      </div>
+
+      {/* Tamano de la hoja de impresion */}
+      <div className="flex items-center gap-1 text-sm">
+        <span className="text-neutral-600">Hoja imp:</span>
+        <NumInputMm
+          valueMm={sheetWmm}
+          factor={factor}
+          onCommitMm={(mm) => onChangeSheetSize(mm, sheetHmm)}
+          className="w-14 px-1.5 py-1 border border-neutral-300 rounded text-right"
+        />
+        <span>x</span>
+        <NumInputMm
+          valueMm={sheetHmm}
+          factor={factor}
+          onCommitMm={(mm) => onChangeSheetSize(sheetWmm, mm)}
+          className="w-14 px-1.5 py-1 border border-neutral-300 rounded text-right"
         />
         <select
           value={unit}
@@ -84,34 +162,61 @@ export default function TopBar({
           <option value="cm">cm</option>
           <option value="mm">mm</option>
         </select>
-
-        <div className="flex items-center gap-1 ml-2">
+        <div className="flex items-center gap-1 ml-1">
           <button
-            onClick={() => setPresetMm(297, 210)}
+            onClick={onResetSheet}
             className="px-1.5 py-0.5 bg-neutral-100 border border-neutral-300 rounded text-xs hover:bg-neutral-200"
-            title="Hoja A4 horizontal -> revista A5 (148x210 mm)"
+            title="Hoja = pliego (1 copia)"
           >
-            A4 → A5
+            =Pliego
           </button>
           <button
-            onClick={() => setPresetMm(420, 297)}
+            onClick={() => onChangeSheetSize(297, 210)}
             className="px-1.5 py-0.5 bg-neutral-100 border border-neutral-300 rounded text-xs hover:bg-neutral-200"
-            title="Hoja A3 horizontal -> revista A4 (210x297 mm)"
+            title="A4 horizontal (297x210 mm)"
           >
-            A3 → A4
+            A4 h
           </button>
           <button
-            onClick={() => setPresetMm(400, 150)}
+            onClick={() => onChangeSheetSize(420, 297)}
             className="px-1.5 py-0.5 bg-neutral-100 border border-neutral-300 rounded text-xs hover:bg-neutral-200"
-            title="Hoja 40x15 cm -> revista 20x15 cm"
+            title="A3 horizontal (420x297 mm)"
           >
-            40×15 cm
+            A3 h
+          </button>
+          <button
+            onClick={() => onChangeSheetSize(450, 320)}
+            className="px-1.5 py-0.5 bg-neutral-100 border border-neutral-300 rounded text-xs hover:bg-neutral-200"
+            title="SRA3 horizontal (450x320 mm)"
+          >
+            SRA3
           </button>
         </div>
       </div>
 
-      <div className="text-xs text-neutral-500">
-        Cada pagina: {fmt(pageWmm)} x {fmt(pageHmm)} {unit}
+      {/* Copias por hoja */}
+      <div className="flex items-center gap-1 text-sm">
+        <span className="text-neutral-600">Copias/hoja:</span>
+        <input
+          type="number"
+          min="1"
+          max={Math.max(1, maxCopies)}
+          step="1"
+          value={copiesPerSheet || 1}
+          onChange={(e) => {
+            const raw = Number(e.target.value)
+            if (!Number.isFinite(raw) || raw < 1) return
+            onChangeCopies(Math.min(Math.max(1, maxCopies || 1), raw))
+          }}
+          className="w-12 px-1.5 py-1 border border-neutral-300 rounded text-right disabled:bg-neutral-100 disabled:text-neutral-400"
+          disabled={!maxCopies}
+        />
+        <span
+          className={`text-xs ${maxCopies > 1 ? 'text-emerald-700' : 'text-neutral-500'}`}
+          title={nupRotated ? 'Las copias se imponen rotadas 90°' : ''}
+        >
+          (entran {maxCopies}{nupRotated ? ' rot.' : ''})
+        </span>
       </div>
 
       <div className="text-sm text-neutral-600">

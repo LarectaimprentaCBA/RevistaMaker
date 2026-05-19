@@ -1,13 +1,10 @@
-import { PDFDocument } from 'pdf-lib'
+import { PDFDocument, degrees, rgb } from 'pdf-lib'
 import { imposeSaddleStitch } from './imposition'
+import { chooseLayout, buildPositions } from './nup'
 
 const MM_TO_PT = 72 / 25.4
 
-// Para cada page object del array (1-indexed dentro del documento), embebe el recurso
-// y devuelve un draw(targetDoc, x, y, w, h) que dibuja esa pagina en una hoja.
 async function buildPageDrawers(pages, targetDoc) {
-  // pages aqui es el array de objetos Page del modelo (orden tal cual se va a leer la revista).
-  // Cache de embeds para no re-embeber un mismo recurso.
   const cache = new Map()
 
   async function getDrawer(page) {
@@ -19,7 +16,6 @@ async function buildPageDrawers(pages, targetDoc) {
         ? await targetDoc.embedPng(page.imageBytes)
         : await targetDoc.embedJpg(page.imageBytes)
       drawer = (pdfPage, x, y, w, h) => {
-        // Ajustar imagen al box manteniendo aspecto (fit interior, centrado).
         const imgAspect = img.width / img.height
         const boxAspect = w / h
         let drawW, drawH
@@ -59,7 +55,6 @@ async function buildPageDrawers(pages, targetDoc) {
         })
       }
     } else {
-      // blank
       drawer = () => {}
     }
 
@@ -70,59 +65,199 @@ async function buildPageDrawers(pages, targetDoc) {
   return getDrawer
 }
 
-// Dibuja un pliego (sheet side = "front"|"back") en una nueva hoja del doc destino.
-// pageWmm/pageHmm son las dimensiones de la pagina final de la revista (cada mitad).
-// El pliego tiene ancho = 2 * pageWmm.
-async function addSheetSide(targetDoc, pages, sideIndices, pageWmm, pageHmm, getDrawer) {
-  const sheetW = 2 * pageWmm * MM_TO_PT
-  const sheetH = pageHmm * MM_TO_PT
-  const pdfPage = targetDoc.addPage([sheetW, sheetH])
+// Construye un PDF "fuente" con todos los pliegos (frente y dorso intercalados, en orden
+// de pliego 1 frente, pliego 1 dorso, pliego 2 frente, ...). Cada pagina del PDF fuente
+// es UNA hoja del pliego, del tamano nativo del pliego (2*pageW × pageH en mm).
+async function buildSourcePliegosDoc(pages, pageWmm, pageHmm) {
+  const sheets = imposeSaddleStitch(pages.length)
+  const doc = await PDFDocument.create()
+  const getDrawer = await buildPageDrawers(pages, doc)
+
+  const pliegoWpt = 2 * pageWmm * MM_TO_PT
+  const pliegoHpt = pageHmm * MM_TO_PT
   const halfW = pageWmm * MM_TO_PT
 
-  // sideIndices = [leftPageNumber, rightPageNumber] (1-indexed sobre pages[])
-  const [leftIdx, rightIdx] = sideIndices
-  const leftPage = pages[leftIdx - 1]
-  const rightPage = pages[rightIdx - 1]
+  const order = []
 
-  if (leftPage) {
-    const drawLeft = await getDrawer(leftPage)
-    drawLeft(pdfPage, 0, 0, halfW, sheetH)
+  async function addSide(side, sheetSide) {
+    const p = doc.addPage([pliegoWpt, pliegoHpt])
+    const [leftIdx, rightIdx] = sheetSide
+    const leftPage = pages[leftIdx - 1]
+    const rightPage = pages[rightIdx - 1]
+    if (leftPage) (await getDrawer(leftPage))(p, 0, 0, halfW, pliegoHpt)
+    if (rightPage) (await getDrawer(rightPage))(p, halfW, 0, halfW, pliegoHpt)
+    order.push(side)
   }
-  if (rightPage) {
-    const drawRight = await getDrawer(rightPage)
-    drawRight(pdfPage, halfW, 0, halfW, sheetH)
+
+  for (const sh of sheets) {
+    await addSide('front', sh.front)
+    await addSide('back', sh.back)
+  }
+
+  return { doc, order, pliegoWpt, pliegoHpt }
+}
+
+// Dibuja un pliego embebido dentro de la caja {x,y,w,h} de la hoja de salida,
+// rotado 90° en sentido horario si rotated=true.
+function drawPliegoIntoBox(outPage, embPliego, pos) {
+  const { x, y, w, h, rotated } = pos
+  if (!rotated) {
+    outPage.drawPage(embPliego, { x, y, width: w, height: h })
+  } else {
+    // El pliego nativo mide pliegoWpt × pliegoHpt. Rotado 90° CW ocupa h × w en bbox.
+    // pdf-lib: rotate gira en sentido antihorario alrededor del punto (x,y) (bottom-left).
+    // Para 90° CW = -90° CCW, el anchor queda en (x, y + h) y dimensiones intercambiadas.
+    outPage.drawPage(embPliego, {
+      x,
+      y: y + h,
+      width: h,
+      height: w,
+      rotate: degrees(-90),
+    })
   }
 }
 
-export async function buildImposedPdfs({ pages, pageWmm, pageHmm, mode }) {
+// Marcas de corte alrededor de las copias. Modos:
+//   'lines'   : lineas grises sobre los bordes del grid de copias (verticales y horizontales).
+//   'corners' : crucecitas tipo trim marks justo afuera de cada copia.
+function drawCropMarks(outPage, positions, mode, sheetWpt, sheetHpt) {
+  if (!positions || positions.length === 0) return
+  if (mode === 'none') return
+
+  const gray = rgb(0.35, 0.35, 0.35)
+
+  if (mode === 'lines') {
+    // Bordes unicos del grid (verticales en x_start, x_start+copyW, ...; idem horizontales).
+    const xs = new Set()
+    const ys = new Set()
+    for (const p of positions) {
+      xs.add(p.x)
+      xs.add(p.x + p.w)
+      ys.add(p.y)
+      ys.add(p.y + p.h)
+    }
+    const lineW = 0.4
+    for (const xv of xs) {
+      outPage.drawLine({
+        start: { x: xv, y: 0 },
+        end: { x: xv, y: sheetHpt },
+        thickness: lineW,
+        color: gray,
+      })
+    }
+    for (const yv of ys) {
+      outPage.drawLine({
+        start: { x: 0, y: yv },
+        end: { x: sheetWpt, y: yv },
+        thickness: lineW,
+        color: gray,
+      })
+    }
+    return
+  }
+
+  if (mode === 'corners') {
+    // Crucecitas en las 4 esquinas de cada copia. Longitud 4 mm, gap 1 mm respecto al borde.
+    const len = 4 * MM_TO_PT
+    const gap = 1 * MM_TO_PT
+    const lineW = 0.5
+
+    function mark(cx, cy, dirX, dirY) {
+      // Linea horizontal saliendo desde (cx + dirX*gap, cy) hacia afuera (dirX).
+      outPage.drawLine({
+        start: { x: cx + dirX * gap, y: cy },
+        end: { x: cx + dirX * (gap + len), y: cy },
+        thickness: lineW,
+        color: gray,
+      })
+      // Linea vertical saliendo desde (cx, cy + dirY*gap) hacia afuera (dirY).
+      outPage.drawLine({
+        start: { x: cx, y: cy + dirY * gap },
+        end: { x: cx, y: cy + dirY * (gap + len) },
+        thickness: lineW,
+        color: gray,
+      })
+    }
+
+    for (const p of positions) {
+      // Esquinas de la copia: (x, y), (x+w, y), (x, y+h), (x+w, y+h)
+      mark(p.x, p.y, -1, -1)         // inferior izq
+      mark(p.x + p.w, p.y, +1, -1)   // inferior der
+      mark(p.x, p.y + p.h, -1, +1)   // superior izq
+      mark(p.x + p.w, p.y + p.h, +1, +1) // superior der
+    }
+  }
+}
+
+// Genera 1 PDF de salida con N copias por hoja. filter selecciona que pliegos van
+// ('front', 'back' o ambos).
+async function buildOutputDoc(srcBytes, srcOrder, filter, layout, sheetWpt, sheetHpt, cropMarks) {
+  const outDoc = await PDFDocument.create()
+  const indices = []
+  for (let i = 0; i < srcOrder.length; i++) {
+    if (filter(srcOrder[i])) indices.push(i)
+  }
+  if (indices.length === 0) return await outDoc.save()
+
+  const embedded = await outDoc.embedPdf(srcBytes, indices)
+
+  for (let i = 0; i < embedded.length; i++) {
+    const side = srcOrder[indices[i]]
+    const embPliego = embedded[i]
+    const outP = outDoc.addPage([sheetWpt, sheetHpt])
+    const positions = buildPositions(layout, sheetWpt, sheetHpt, side)
+    for (const pos of positions) {
+      drawPliegoIntoBox(outP, embPliego, pos)
+    }
+    drawCropMarks(outP, positions, cropMarks, sheetWpt, sheetHpt)
+  }
+
+  return await outDoc.save()
+}
+
+export async function buildImposedPdfs({
+  pages,
+  pageWmm,
+  pageHmm,
+  sheetWmm,
+  sheetHmm,
+  copiesPerSheet,
+  mode,
+  cropMarks = 'none',
+}) {
   if (pages.length % 4 !== 0) {
     throw new Error('La cantidad de paginas debe ser multiplo de 4')
   }
 
-  const sheets = imposeSaddleStitch(pages.length)
+  // Defaults compatibles con el comportamiento anterior: hoja = pliego (1 copia).
+  const pliegoWmm = 2 * pageWmm
+  const pliegoHmm = pageHmm
+  const finalSheetW = sheetWmm && sheetWmm > 0 ? sheetWmm : pliegoWmm
+  const finalSheetH = sheetHmm && sheetHmm > 0 ? sheetHmm : pliegoHmm
+
+  const layout = chooseLayout(pliegoWmm, pliegoHmm, finalSheetW, finalSheetH, copiesPerSheet)
+  if (layout.copies <= 0) {
+    throw new Error('La hoja de impresion es mas chica que el pliego de la revista')
+  }
+
+  // Convertir layout a puntos PDF.
+  const layoutPt = {
+    ...layout,
+    copyW: layout.copyW * MM_TO_PT,
+    copyH: layout.copyH * MM_TO_PT,
+  }
+  const sheetWpt = finalSheetW * MM_TO_PT
+  const sheetHpt = finalSheetH * MM_TO_PT
+
+  const { doc: srcDoc, order } = await buildSourcePliegosDoc(pages, pageWmm, pageHmm)
+  const srcBytes = await srcDoc.save()
 
   if (mode === 'single') {
-    const doc = await PDFDocument.create()
-    const getDrawer = await buildPageDrawers(pages, doc)
-    // Orden: pliego 1 frente, pliego 1 dorso, pliego 2 frente, pliego 2 dorso, ...
-    for (const sheet of sheets) {
-      await addSheetSide(doc, pages, sheet.front, pageWmm, pageHmm, getDrawer)
-      await addSheetSide(doc, pages, sheet.back, pageWmm, pageHmm, getDrawer)
-    }
-    const bytes = await doc.save()
+    const bytes = await buildOutputDoc(srcBytes, order, () => true, layoutPt, sheetWpt, sheetHpt, cropMarks)
     return { single: bytes }
   }
 
-  // mode === 'split'
-  const frontsDoc = await PDFDocument.create()
-  const backsDoc = await PDFDocument.create()
-  const frontsDrawer = await buildPageDrawers(pages, frontsDoc)
-  const backsDrawer = await buildPageDrawers(pages, backsDoc)
-  for (const sheet of sheets) {
-    await addSheetSide(frontsDoc, pages, sheet.front, pageWmm, pageHmm, frontsDrawer)
-    await addSheetSide(backsDoc, pages, sheet.back, pageWmm, pageHmm, backsDrawer)
-  }
-  const frontsBytes = await frontsDoc.save()
-  const backsBytes = await backsDoc.save()
-  return { fronts: frontsBytes, backs: backsBytes }
+  const fronts = await buildOutputDoc(srcBytes, order, (s) => s === 'front', layoutPt, sheetWpt, sheetHpt, cropMarks)
+  const backs = await buildOutputDoc(srcBytes, order, (s) => s === 'back', layoutPt, sheetWpt, sheetHpt, cropMarks)
+  return { fronts, backs }
 }

@@ -1,19 +1,27 @@
-import React, { useCallback, useEffect, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import TopBar from './components/TopBar.jsx'
 import Spread from './components/Spread.jsx'
 import SortablePageStrip from './components/SortablePageStrip.jsx'
+import ExportDialog from './components/ExportDialog.jsx'
 import { loadFilesAsPages, makeBlankPage } from './lib/fileLoader.js'
 import { needsForMultipleOfFour } from './lib/imposition.js'
 import { buildImposedPdfs } from './lib/exportPdf.js'
+import { calcMaxNUp } from './lib/nup.js'
 
 export default function App() {
   const [pages, setPages] = useState([])
   const [pageWmm, setPageWmm] = useState(148) // A5 default
   const [pageHmm, setPageHmm] = useState(210)
+  // Hoja de impresion: arranca igual al pliego (1 copia, comportamiento previo).
+  const [sheetWmm, setSheetWmm] = useState(2 * 148)
+  const [sheetHmm, setSheetHmm] = useState(210)
+  const [copiesPerSheet, setCopiesPerSheet] = useState(1)
+  const [sheetLinked, setSheetLinked] = useState(true) // si true, sheet sigue automaticamente al pliego
   const [spreadIndex, setSpreadIndex] = useState(0)
   const [busy, setBusy] = useState(false)
   const [toast, setToast] = useState(null)
   const [updater, setUpdater] = useState(null)
+  const [exportRequest, setExportRequest] = useState(null) // { mode } | null
 
   useEffect(() => {
     if (!window.api?.onUpdaterStatus) return
@@ -22,6 +30,27 @@ export default function App() {
 
   const validation = needsForMultipleOfFour(pages.length)
   const spreadCount = Math.max(1, Math.ceil((pages.length + 1) / 2))
+  const pliegoCount = Math.ceil(pages.length / 4)
+
+  // Recalcular layout n-up cuando cambian dimensiones.
+  const nup = useMemo(
+    () => calcMaxNUp(2 * pageWmm, pageHmm, sheetWmm, sheetHmm),
+    [pageWmm, pageHmm, sheetWmm, sheetHmm]
+  )
+
+  // Si la hoja esta "linkeada" al pliego, mantenerla sincronizada cuando cambia el pliego.
+  useEffect(() => {
+    if (sheetLinked) {
+      setSheetWmm(2 * pageWmm)
+      setSheetHmm(pageHmm)
+    }
+  }, [pageWmm, pageHmm, sheetLinked])
+
+  // Al cambiar dimensiones de hoja o pliego, resetear copias al maximo (auto).
+  // El override manual del usuario se mantiene mientras no cambien las dimensiones.
+  useEffect(() => {
+    setCopiesPerSheet(Math.max(1, nup.maxCopies))
+  }, [pageWmm, pageHmm, sheetWmm, sheetHmm])
 
   useEffect(() => {
     if (spreadIndex >= spreadCount) setSpreadIndex(Math.max(0, spreadCount - 1))
@@ -70,7 +99,24 @@ export default function App() {
     if (confirm('Quitar todas las paginas cargadas?')) setPages([])
   }
 
-  async function handleExport(mode) {
+  function handleChangePageSize(w, h) {
+    setPageWmm(w)
+    setPageHmm(h)
+  }
+
+  function handleChangeSheetSize(w, h) {
+    setSheetLinked(false)
+    setSheetWmm(w)
+    setSheetHmm(h)
+  }
+
+  function handleResetSheet() {
+    setSheetLinked(true)
+    setSheetWmm(2 * pageWmm)
+    setSheetHmm(pageHmm)
+  }
+
+  function handleRequestExport(mode) {
     if (!validation.ok) {
       showToast(`Faltan ${validation.missing} paginas para multiplo de 4`, 'error')
       return
@@ -79,11 +125,31 @@ export default function App() {
       showToast('Tamaño de pagina invalido', 'error')
       return
     }
+    if (nup.maxCopies <= 0) {
+      showToast('La hoja de impresion es mas chica que el pliego de la revista', 'error')
+      return
+    }
+    setExportRequest({ mode })
+  }
+
+  async function handleConfirmExport(cropMarks) {
+    const req = exportRequest
+    setExportRequest(null)
+    if (!req) return
     setBusy(true)
     try {
-      const result = await buildImposedPdfs({ pages, pageWmm, pageHmm, mode })
+      const result = await buildImposedPdfs({
+        pages,
+        pageWmm,
+        pageHmm,
+        sheetWmm,
+        sheetHmm,
+        copiesPerSheet,
+        mode: req.mode,
+        cropMarks,
+      })
 
-      if (mode === 'single') {
+      if (req.mode === 'single') {
         const filePath = await window.api.saveFile({
           defaultPath: `revista_${pages.length}p.pdf`,
           filters: [{ name: 'PDF', extensions: ['pdf'] }],
@@ -115,7 +181,6 @@ export default function App() {
     }
   }
 
-  // Atajos teclado: flechas para navegar
   useEffect(() => {
     function onKey(e) {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return
@@ -154,13 +219,18 @@ export default function App() {
       <TopBar
         pageWmm={pageWmm}
         pageHmm={pageHmm}
-        onChangeSize={(w, h) => {
-          setPageWmm(w)
-          setPageHmm(h)
-        }}
+        sheetWmm={sheetWmm}
+        sheetHmm={sheetHmm}
+        copiesPerSheet={copiesPerSheet}
+        maxCopies={nup.maxCopies}
+        nupRotated={nup.rotated}
+        onChangePageSize={handleChangePageSize}
+        onChangeSheetSize={handleChangeSheetSize}
+        onChangeCopies={setCopiesPerSheet}
+        onResetSheet={handleResetSheet}
         onLoadFiles={handleLoadFiles}
         onClearAll={handleClearAll}
-        onExport={handleExport}
+        onExport={handleRequestExport}
         exportEnabled={validation.ok && pages.length > 0}
         busy={busy}
         totalPages={pages.length}
@@ -171,6 +241,14 @@ export default function App() {
           La cantidad de paginas ({pages.length}) no es multiplo de 4. Faltan{' '}
           <b>{validation.missing}</b> pagina{validation.missing === 1 ? '' : 's'} para poder armar
           la revista. Agrega paginas o usa "+ Pagina en blanco" abajo.
+        </div>
+      )}
+
+      {nup.maxCopies <= 0 && pages.length > 0 && (
+        <div className="bg-red-100 border-b border-red-300 text-red-900 px-4 py-2 text-sm">
+          La hoja de impresion ({(sheetWmm / 10).toFixed(1)}×{(sheetHmm / 10).toFixed(1)} cm) es mas
+          chica que el pliego de la revista ({(2 * pageWmm / 10).toFixed(1)}×{(pageHmm / 10).toFixed(1)} cm).
+          Agranda la hoja o achica la revista.
         </div>
       )}
 
@@ -202,6 +280,18 @@ export default function App() {
           onAddBlank={handleAddBlank}
         />
       )}
+
+      <ExportDialog
+        open={!!exportRequest}
+        mode={exportRequest?.mode}
+        totalPages={pages.length}
+        pliegoCount={pliegoCount}
+        copiesPerSheet={copiesPerSheet}
+        sheetWmm={sheetWmm}
+        sheetHmm={sheetHmm}
+        onCancel={() => setExportRequest(null)}
+        onConfirm={handleConfirmExport}
+      />
 
       {toast && (
         <div
