@@ -4,8 +4,53 @@ import { chooseLayout, buildPositions } from './nup'
 
 const MM_TO_PT = 72 / 25.4
 
+// Encaja un contenido de srcW×srcH dentro de la caja w×h conservando la
+// proporcion, centrado. Devuelve el tamano dibujado y el offset dentro de la caja.
+function fitIntoBox(srcW, srcH, w, h) {
+  const srcAspect = srcW / srcH
+  const boxAspect = w / h
+  let drawW, drawH
+  if (srcAspect > boxAspect) {
+    drawW = w
+    drawH = w / srcAspect
+  } else {
+    drawH = h
+    drawW = h * srcAspect
+  }
+  return { drawW, drawH, offX: (w - drawW) / 2, offY: (h - drawH) / 2 }
+}
+
+// Dibuja una pagina embebida ocupando exactamente la caja (x, y, w, h), donde w y h
+// son las medidas YA VISIBLES, aplicando el /Rotate que traia el PDF original.
+// pdf-lib rota en sentido antihorario alrededor del punto (x, y) que le pasamos, y
+// escala con width/height contra las dimensiones SIN rotar del XObject: por eso en
+// 90 y 270 hay que intercambiarlas y mover el ancla a la esquina que corresponde.
+function drawEmbeddedPage(pdfPage, embedded, x, y, w, h, rotation) {
+  if (rotation === 90) {
+    pdfPage.drawPage(embedded, { x, y: y + h, width: h, height: w, rotate: degrees(-90) })
+  } else if (rotation === 180) {
+    pdfPage.drawPage(embedded, { x: x + w, y: y + h, width: w, height: h, rotate: degrees(180) })
+  } else if (rotation === 270) {
+    pdfPage.drawPage(embedded, { x: x + w, y, width: h, height: w, rotate: degrees(90) })
+  } else {
+    pdfPage.drawPage(embedded, { x, y, width: w, height: h })
+  }
+}
+
 async function buildPageDrawers(pages, targetDoc) {
   const cache = new Map()
+  // Un mismo archivo PDF aporta varias paginas: lo parseamos una sola vez.
+  // La clave es el Uint8Array, que fileLoader comparte entre las paginas del archivo.
+  const srcDocs = new Map()
+
+  function loadSourceDoc(bytes) {
+    let p = srcDocs.get(bytes)
+    if (!p) {
+      p = PDFDocument.load(bytes)
+      srcDocs.set(bytes, p)
+    }
+    return p
+  }
 
   async function getDrawer(page) {
     if (cache.has(page.id)) return cache.get(page.id)
@@ -16,43 +61,36 @@ async function buildPageDrawers(pages, targetDoc) {
         ? await targetDoc.embedPng(page.imageBytes)
         : await targetDoc.embedJpg(page.imageBytes)
       drawer = (pdfPage, x, y, w, h) => {
-        const imgAspect = img.width / img.height
-        const boxAspect = w / h
-        let drawW, drawH
-        if (imgAspect > boxAspect) {
-          drawW = w
-          drawH = w / imgAspect
-        } else {
-          drawH = h
-          drawW = h * imgAspect
-        }
-        const drawX = x + (w - drawW) / 2
-        const drawY = y + (h - drawH) / 2
-        pdfPage.drawImage(img, { x: drawX, y: drawY, width: drawW, height: drawH })
+        const { drawW, drawH, offX, offY } = fitIntoBox(img.width, img.height, w, h)
+        pdfPage.drawImage(img, { x: x + offX, y: y + offY, width: drawW, height: drawH })
       }
     } else if (page.type === 'pdf') {
-      const [embedded] = await targetDoc.embedPdf(page.pdfBytes, [page.pdfPageIndex])
+      const srcDoc = await loadSourceDoc(page.pdfBytes)
+      const srcPage = srcDoc.getPage(page.pdfPageIndex)
+
+      // Por defecto pdf-lib embebe usando el MediaBox y ademas le fuerza el origen a
+      // (0, 0). Si el PDF trae el origen desplazado —Canva exporta con y=7.83pt— el
+      // contenido queda corrido: banda en blanco de ese alto abajo y el mismo recorte
+      // arriba. Pasandole el CropBox con su origen real, pdf-lib arma la Matrix que lo
+      // compensa. getCropBox() cae al MediaBox cuando el PDF no declara CropBox.
+      const box = srcPage.getCropBox()
+      const embedded = await targetDoc.embedPage(srcPage, {
+        left: box.x,
+        bottom: box.y,
+        right: box.x + box.width,
+        top: box.y + box.height,
+      })
+
+      // pdf-lib tampoco aplica el /Rotate de la pagina fuente al embeberla (los visores
+      // si lo respetan), asi que lo compensamos nosotros al dibujar.
+      const rotation = ((srcPage.getRotation().angle % 360) + 360) % 360
+      const swapped = rotation === 90 || rotation === 270
+      const visibleW = swapped ? embedded.height : embedded.width
+      const visibleH = swapped ? embedded.width : embedded.height
+
       drawer = (pdfPage, x, y, w, h) => {
-        const srcW = embedded.width
-        const srcH = embedded.height
-        const srcAspect = srcW / srcH
-        const boxAspect = w / h
-        let drawW, drawH
-        if (srcAspect > boxAspect) {
-          drawW = w
-          drawH = w / srcAspect
-        } else {
-          drawH = h
-          drawW = h * srcAspect
-        }
-        const drawX = x + (w - drawW) / 2
-        const drawY = y + (h - drawH) / 2
-        pdfPage.drawPage(embedded, {
-          x: drawX,
-          y: drawY,
-          width: drawW,
-          height: drawH,
-        })
+        const { drawW, drawH, offX, offY } = fitIntoBox(visibleW, visibleH, w, h)
+        drawEmbeddedPage(pdfPage, embedded, x + offX, y + offY, drawW, drawH, rotation)
       }
     } else {
       drawer = () => {}
