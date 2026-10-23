@@ -8,7 +8,8 @@ function NumInputMm({ valueMm, factor, onCommitMm, className = '' }) {
   const formatted = (mm) => {
     const v = (mm || 0) / factor
     if (!Number.isFinite(v)) return ''
-    return Number.isInteger(v) ? String(v) : v.toFixed(1)
+    // Hasta 2 decimales sin ceros de relleno: 148 -> "148", 148.5 -> "148.5", 14.85 cm -> "14.85"
+    return String(Math.round(v * 100) / 100)
   }
 
   const [text, setText] = useState(formatted(valueMm))
@@ -77,7 +78,7 @@ export default function TopBar({
   totalPages,
 }) {
   const fileRef = useRef(null)
-  const [unit, setUnit] = useState('cm')
+  const [unit, setUnit] = useState('mm')
 
   const factor = unit === 'cm' ? 10 : 1
 
@@ -159,8 +160,8 @@ export default function TopBar({
           onChange={(e) => setUnit(e.target.value)}
           className="px-1 py-1 border border-neutral-300 rounded bg-white"
         >
-          <option value="cm">cm</option>
           <option value="mm">mm</option>
+          <option value="cm">cm</option>
         </select>
         <div className="flex items-center gap-1 ml-1">
           <button

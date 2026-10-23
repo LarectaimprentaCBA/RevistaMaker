@@ -17,7 +17,7 @@ export default function ExportDialog({
 
   const physicalSheets = Math.ceil(pliegoCount / copiesPerSheet)
   const totalOutputPages = physicalSheets * 2 // frente + dorso de cada hoja fisica
-  const fmtCm = (mm) => (mm / 10).toFixed(mm % 10 === 0 ? 0 : 1)
+  const fmtMm = (mm) => String(Math.round(mm * 100) / 100)
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
@@ -28,7 +28,7 @@ export default function ExportDialog({
         <div className="text-sm text-neutral-600 mb-4">
           {totalPages} pag · {pliegoCount} pliego{pliegoCount === 1 ? '' : 's'} · {copiesPerSheet}{' '}
           {copiesPerSheet === 1 ? 'copia' : 'copias'} por hoja → <b>{physicalSheets}</b> hoja{physicalSheets === 1 ? '' : 's'} fisica{physicalSheets === 1 ? '' : 's'}
-          {' '}({totalOutputPages} pag de salida) en hoja {fmtCm(sheetWmm)}×{fmtCm(sheetHmm)} cm
+          {' '}({totalOutputPages} pag de salida) en hoja {fmtMm(sheetWmm)}×{fmtMm(sheetHmm)} mm
         </div>
 
         <div className="text-sm font-medium text-neutral-700 mb-2">Marcas de corte</div>

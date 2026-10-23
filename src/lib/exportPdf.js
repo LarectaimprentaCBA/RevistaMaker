@@ -4,11 +4,20 @@ import { chooseLayout, buildPositions } from './nup'
 
 const MM_TO_PT = 72 / 25.4
 
+// Si la proporcion del archivo y la de la caja difieren menos que esto, se estira para
+// llenar la caja. Sin esto, medio milimetro de diferencia entre el PDF y el tamano
+// cargado deja una franja blanca finita en el lomo (cada pagina se achica hacia su
+// centro). Un 1% de deformacion no se nota a simple vista.
+const ASPECT_TOLERANCE = 0.01
+
 // Encaja un contenido de srcW×srcH dentro de la caja w×h conservando la
 // proporcion, centrado. Devuelve el tamano dibujado y el offset dentro de la caja.
 function fitIntoBox(srcW, srcH, w, h) {
   const srcAspect = srcW / srcH
   const boxAspect = w / h
+  if (Math.abs(srcAspect / boxAspect - 1) < ASPECT_TOLERANCE) {
+    return { drawW: w, drawH: h, offX: 0, offY: 0 }
+  }
   let drawW, drawH
   if (srcAspect > boxAspect) {
     drawW = w
