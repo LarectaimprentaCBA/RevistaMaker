@@ -77,6 +77,13 @@ async function buildPageDrawers(pages, targetDoc) {
       const srcDoc = await loadSourceDoc(page.pdfBytes)
       const srcPage = srcDoc.getPage(page.pdfPageIndex)
 
+      // Una pagina sin /Contents es una pagina vacia (algunos exportadores la dejan asi
+      // para las blancas). pdf-lib se niega a embeberla, asi que la tratamos como blanca.
+      if (!srcPage.node.normalizedEntries().Contents) {
+        cache.set(page.id, () => {})
+        return cache.get(page.id)
+      }
+
       // Por defecto pdf-lib embebe usando el MediaBox y ademas le fuerza el origen a
       // (0, 0). Si el PDF trae el origen desplazado —Canva exporta con y=7.83pt— el
       // contenido queda corrido: banda en blanco de ese alto abajo y el mismo recorte
@@ -128,6 +135,10 @@ async function buildSourcePliegosDoc(pages, pageWmm, pageHmm) {
 
   async function addSide(side, sheetSide) {
     const p = doc.addPage([pliegoWpt, pliegoHpt])
+    // Crea el content stream aunque quede vacio: si las dos paginas del pliego son
+    // blancas no se dibuja nada, y pdf-lib no puede embeber una pagina sin /Contents
+    // al pasarla a la hoja de impresion.
+    p.pushOperators()
     const [leftIdx, rightIdx] = sheetSide
     const leftPage = pages[leftIdx - 1]
     const rightPage = pages[rightIdx - 1]
