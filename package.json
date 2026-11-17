@@ -61,7 +61,6 @@
       "signtoolOptions": {
         "publisherName": "La Recta Imprenta",
         "certificateFile": "build/codesign.pfx",
-        "certificatePassword": "PrintLayoutLR2026",
         "signingHashAlgorithms": [
           "sha256"
         ]

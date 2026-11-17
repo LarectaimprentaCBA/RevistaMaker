@@ -6,3 +6,5 @@ release/
 
 # Code signing - mantener PFX fuera del repo, solo el .cer publico se commitea
 build/codesign.pfx
+# Contraseña del PFX (WIN_CSC_KEY_PASSWORD); electron-builder la lee de aca
+electron-builder.env
