@@ -1,6 +1,6 @@
 {
   "name": "revistamaker",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Imposicion saddle-stitch para revistas abrochadas a caballo - La Recta Imprenta",
   "type": "module",
   "author": {
@@ -62,7 +62,9 @@
         "publisherName": "La Recta Imprenta",
         "certificateFile": "build/codesign.pfx",
         "certificatePassword": "PrintLayoutLR2026",
-        "signingHashAlgorithms": ["sha256"]
+        "signingHashAlgorithms": [
+          "sha256"
+        ]
       }
     },
     "nsis": {
